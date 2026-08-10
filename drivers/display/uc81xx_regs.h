@@ -94,7 +94,8 @@
 #define UC8176_CDI_VBD1				BIT(7)
 #define UC8176_CDI_DDX1				BIT(5)
 #define UC8176_CDI_DDX0				BIT(4)
-#define UC8176_CDI_CDI_MASK			0x0f
+#define UC8176_CDI_CDI_MASK			GENMASK(3, 0)
+#define UC8176_CDI_DEFAULT_INTERVAL	0x07
 
 #define UC8179_CDI_REG_LENGTH			2U
 #define UC8179_CDI_BDZ_DDX_IDX			0
@@ -105,6 +106,8 @@
 #define UC8179_CDI_N2OCP			BIT(3)
 #define UC8179_CDI_DDX1				BIT(1)
 #define UC8179_CDI_DDX0				BIT(0)
+#define UC8179_CDI_CDI_MASK			GENMASK(3, 0)
+#define UC8179_CDI_DEFAULT_INTERVAL	0x07
 
 struct uc81xx_tres8 {
 	uint8_t hres;
@@ -169,10 +172,9 @@ BUILD_ASSERT(sizeof(struct uc8151d_ptl) == 7);
 #define UC8151D_CDI_DEFAULT			0xD7    /* Default value */
 
 /* UC8151D CDI VBD values for border control */
-#define UC8151D_CDI_VBD_FLOATING	0x00    /* Floating border */
-#define UC8151D_CDI_VBD_LUT1		0x40    /* LUT1 border */
-#define UC8151D_CDI_VBD_LUT2		0x80    /* LUT2 border */
-#define UC8151D_CDI_VBD_LUT3		0xC0    /* LUT3 border */
+#define UC8151D_CDI_VBD_FLOATING		(BIT(7) | BIT(6))
+#define UC8151D_CDI_VBD_LUTWK			BIT(6)
+#define UC8151D_CDI_VBD_LUTKW			BIT(7)
 
 /* UC8151D CDI DDX values for data polarity */
 #define UC8151D_CDI_DDX_DEFAULT		0x10    /* Default DDX setting */
@@ -184,7 +186,7 @@ BUILD_ASSERT(sizeof(struct uc8151d_ptl) == 7);
 #define UC81XX_PTL_FLAG_PT_SCAN		BIT(0)
 
 /* Time constants in ms */
-#define UC81XX_RESET_DELAY			10U
+#define UC81XX_RESET_DELAY			2U
 #define UC81XX_PON_DELAY			100U
 #define UC81XX_BUSY_DELAY			1U
 

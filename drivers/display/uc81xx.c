@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdint.h>
 #include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/init.h>
@@ -41,6 +42,11 @@ enum uc81xx_profile_type {
 	UC81XX_PROFILE_INVALID = UC81XX_NUM_PROFILES,
 };
 
+enum uc81xx_phase {
+	UC81XX_PHASE_NORMAL = 0,
+	UC81XX_PHASE_SWAPPED,
+};
+
 struct uc81xx_profile {
 	struct uc81xx_dt_array pwr;
 
@@ -67,6 +73,7 @@ struct uc81xx_quirks {
 
 	bool auto_copy;
 	bool pon_after_softstart;
+	bool dtm_swap;
 
 	int (*set_cdi)(const struct device *dev, bool border);
 	int (*set_tres)(const struct device *dev);
@@ -93,6 +100,7 @@ struct uc81xx_config {
 struct uc81xx_data {
 	bool blanking_on;
 	enum uc81xx_profile_type profile;
+	enum uc81xx_phase phase;
 };
 
 
@@ -127,7 +135,7 @@ static inline int uc81xx_write_cmd_pattern(const struct device *dev,
 					   uint8_t pattern, size_t len)
 {
 	const struct uc81xx_config *config = dev->config;
-	struct display_buffer_descriptor mipi_desc;
+	struct display_buffer_descriptor mipi_desc = { 0 };
 	int err;
 	uint8_t data[64];
 
@@ -136,6 +144,7 @@ static inline int uc81xx_write_cmd_pattern(const struct device *dev,
 	err = mipi_dbi_command_write(config->mipi_dev, &config->dbi_config,
 				     cmd, NULL, 0);
 	if (err < 0) {
+		mipi_dbi_release(config->mipi_dev, &config->dbi_config);
 		return err;
 	}
 
@@ -155,13 +164,12 @@ static inline int uc81xx_write_cmd_pattern(const struct device *dev,
 					     data, &mipi_desc,
 					     PIXEL_FORMAT_MONO10);
 		if (err < 0) {
-			goto out;
+			break;
 		}
 
 		len -= mipi_desc.buf_size;
 	}
 
-out:
 	mipi_dbi_release(config->mipi_dev, &config->dbi_config);
 	return err;
 }
@@ -250,7 +258,7 @@ static int uc81xx_set_profile(const struct device *dev,
 		 * the user.
 		 */
 		if (p->lutc.len || p->lutww.len || p->lutkw.len ||
-		    p->lutwk.len || p->lutbd.len) {
+		    p->lutwk.len || p->lutkk.len || p->lutbd.len) {
 			LOG_DBG("Using LUT from registers");
 			psr |= UC81XX_PSR_REG;
 		}
@@ -349,6 +357,16 @@ static int uc81xx_update_display(const struct device *dev)
 		return -EIO;
 	}
 
+	const struct uc81xx_config *config = dev->config;
+	struct uc81xx_data *data = dev->data;
+	if (config->quirks->dtm_swap) {
+		// UC8253 has an undocumented quirk that swaps DTM1 with DTM2
+		// on every refresh
+		data->phase = (data->phase == UC81XX_PHASE_NORMAL)
+							? UC81XX_PHASE_SWAPPED 
+							: UC81XX_PHASE_NORMAL;
+	}
+
 	return 0;
 }
 
@@ -376,6 +394,12 @@ static int uc81xx_blanking_on(const struct device *dev)
 		if (uc81xx_set_profile(dev, UC81XX_PROFILE_FULL)) {
 			return -EIO;
 		}
+		const struct uc81xx_config *config = dev->config;
+		const int size = config->width * config->height
+			/ UC81XX_PIXELS_PER_BYTE;
+		if (uc81xx_write_cmd_pattern(dev, UC81XX_CMD_DTM1, 0xff, size)) {
+			return -EIO;
+		}
 	}
 
 	data->blanking_on = true;
@@ -392,20 +416,18 @@ static int uc81xx_write(const struct device *dev, const uint16_t x, const uint16
 
 	uint16_t x_end_idx = x + desc->width - 1;
 	uint16_t y_end_idx = y + desc->height - 1;
-	size_t buf_len;
-	const uint8_t back_buffer = data->blanking_on ?
-		UC81XX_CMD_DTM1 : UC81XX_CMD_DTM2;
+	size_t buf_len = desc->width * desc->height / UC81XX_PIXELS_PER_BYTE;
 
 	LOG_DBG("x %u, y %u, height %u, width %u, pitch %u",
 		x, y, desc->height, desc->width, desc->pitch);
 
-	buf_len = MIN(desc->buf_size,
-		      desc->height * desc->width / UC81XX_PIXELS_PER_BYTE);
-	__ASSERT(desc->width <= desc->pitch, "Pitch is smaller than width");
+	__ASSERT(desc->width == desc->pitch, "Non-contiguous display buffers are not supported");
 	__ASSERT(buf != NULL, "Buffer is not available");
-	__ASSERT(buf_len != 0U, "Buffer of length zero");
+	__ASSERT(desc->buf_size >= buf_len, "Buffer size too small");
 	__ASSERT(!(desc->width % UC81XX_PIXELS_PER_BYTE),
-		 "Buffer width not multiple of %d", UC81XX_PIXELS_PER_BYTE);
+		 "Width must be aligned to %u pixels", UC81XX_PIXELS_PER_BYTE);
+	__ASSERT(!(x % UC81XX_PIXELS_PER_BYTE),
+		 "X must be aligned to %u pixels", UC81XX_PIXELS_PER_BYTE);
 
 	if ((y_end_idx > (config->height - 1)) ||
 	    (x_end_idx > (config->width - 1))) {
@@ -438,7 +460,9 @@ static int uc81xx_write(const struct device *dev, const uint16_t x, const uint16
 		return -EIO;
 	}
 
-	if (uc81xx_write_cmd(dev, UC81XX_CMD_DTM2, (uint8_t *)buf, buf_len)) {
+	if (uc81xx_write_cmd(dev,
+			     data->phase == UC81XX_PHASE_NORMAL ? UC81XX_CMD_DTM2 : UC81XX_CMD_DTM1,
+			     (uint8_t *)buf, buf_len)) {
 		return -EIO;
 	}
 
@@ -457,21 +481,18 @@ static int uc81xx_write(const struct device *dev, const uint16_t x, const uint16
 		if (config->quirks->set_cdi(dev, true)) {
 			return -EIO;
 		}
-	}
 
-	if (!config->quirks->auto_copy) {
-		/* Some controllers don't copy the new data to the old
-		 * data buffer on refresh. Do that manually here if
-		 * needed.
-		 */
-
-		if (config->quirks->set_ptl(dev, x, y, x_end_idx, y_end_idx, desc)) {
-			return -EIO;
-		}
-
-		if (uc81xx_write_cmd(dev, back_buffer,
-				     (uint8_t *)buf, buf_len)) {
-			return -EIO;
+		if (!config->quirks->auto_copy) {
+			/* Some controllers don't copy the new data to the old
+			 * data buffer on refresh. Do that manually here if
+			 * needed.
+			 */
+			if (uc81xx_write_cmd(dev,
+					     data->phase == UC81XX_PHASE_NORMAL ? UC81XX_CMD_DTM1
+										: UC81XX_CMD_DTM2,
+					     (uint8_t *)buf, buf_len)) {
+				return -EIO;
+			}
 		}
 	}
 
@@ -544,6 +565,7 @@ static int uc81xx_controller_init(const struct device *dev)
 
 	data->blanking_on = true;
 	data->profile = UC81XX_PROFILE_INVALID;
+	data->phase = UC81XX_PHASE_NORMAL;
 
 	if (uc81xx_set_profile(dev, UC81XX_PROFILE_FULL)) {
 		return -EIO;
@@ -610,7 +632,7 @@ static inline int uc81xx_set_ptl_8(const struct device *dev, uint16_t x, uint16_
 	};
 
 	/* Setup Partial Window and enable Partial Mode */
-	LOG_HEXDUMP_DBG(&ptl, sizeof(ptl), "ptl");
+	LOG_HEXDUMP_DBG(&ptl, sizeof(ptl), "PTL");
 
 	return uc81xx_write_cmd(dev, UC81XX_CMD_PTL, (const void *)&ptl, sizeof(ptl));
 }
@@ -643,7 +665,7 @@ static inline int uc81xx_set_ptl_16(const struct device *dev, uint16_t x, uint16
 	};
 
 	/* Setup Partial Window and enable Partial Mode */
-	LOG_HEXDUMP_DBG(&ptl, sizeof(ptl), "ptl");
+	LOG_HEXDUMP_DBG(&ptl, sizeof(ptl), "PTL");
 
 	return uc81xx_write_cmd(dev, UC81XX_CMD_PTL, (const void *)&ptl, sizeof(ptl));
 }
@@ -655,12 +677,15 @@ static int uc8176_set_cdi(const struct device *dev, bool border)
 	const struct uc81xx_config *config = dev->config;
 	const struct uc81xx_data *data = dev->data;
 	const struct uc81xx_profile *p = config->profiles[data->profile];
-	uint8_t cdi = UC8176_CDI_VBD1 | UC8176_CDI_DDX0 |
-		(p ? (p->cdi & UC8176_CDI_CDI_MASK) : 0);
 
-	if (!p || !p->override_cdi) {
-		return 0;
+	uint8_t interval = UC8176_CDI_DEFAULT_INTERVAL;
+
+	if (p && p->override_cdi) {
+		interval = p->cdi & UC8176_CDI_CDI_MASK;
 	}
+
+	// Border uses LUTKW
+	uint8_t cdi = UC8176_CDI_VBD1 | UC8176_CDI_DDX0 | interval;
 
 	if (!border) {
 		/* Floating border */
@@ -679,6 +704,7 @@ static const struct uc81xx_quirks uc8175_quirks = {
 
 	.auto_copy = false,
 	.pon_after_softstart = false,
+	.dtm_swap = false,
 
 	.set_cdi = uc8176_set_cdi,
 	.set_tres = uc81xx_set_tres_8,
@@ -693,6 +719,7 @@ static const struct uc81xx_quirks uc8176_quirks = {
 
 	.auto_copy = false,
 	.pon_after_softstart = false,
+	.dtm_swap = false,
 
 	.set_cdi = uc8176_set_cdi,
 	.set_tres = uc81xx_set_tres_16,
@@ -701,7 +728,7 @@ static const struct uc81xx_quirks uc8176_quirks = {
 #endif
 
 #if DT_HAS_COMPAT_STATUS_OKAY(ultrachip_uc8151d) || DT_HAS_COMPAT_STATUS_OKAY(ultrachip_uc8253)
-static int uc8151d_set_tres(const struct device *dev)
+static int uc81xx_set_tres_h8v16(const struct device *dev)
 {
 	const struct uc81xx_config *config = dev->config;
 	/* Pass pixel coordinates directly; hardware interprets as byte+bit encoding
@@ -718,7 +745,7 @@ static int uc8151d_set_tres(const struct device *dev)
 			       (const void *)&tres, sizeof(tres));
 }
 
-static int uc8151d_set_ptl(const struct device *dev, uint16_t x, uint16_t y,
+static int uc81xx_set_ptl_h8v16(const struct device *dev, uint16_t x, uint16_t y,
 			   uint16_t x_end_idx, uint16_t y_end_idx,
 			   const struct display_buffer_descriptor *desc)
 {
@@ -734,7 +761,7 @@ static int uc8151d_set_ptl(const struct device *dev, uint16_t x, uint16_t y,
 	};
 
 	/* Setup Partial Window and enable Partial Mode */
-	LOG_HEXDUMP_DBG(&ptl, sizeof(ptl), "ptl");
+	LOG_HEXDUMP_DBG(&ptl, sizeof(ptl), "PTL");
 
 	return uc81xx_write_cmd(dev, UC81XX_CMD_PTL,
 			       (const void *)&ptl, sizeof(ptl));
@@ -756,9 +783,9 @@ static int uc8151d_set_cdi(const struct device *dev, bool border)
 		      (p->cdi & UC8151D_CDI_MASK);
 	}
 
-	if (!border) {
-		/* Set VBD to floating for no border */
-		cdi = (cdi & ~UC8151D_CDI_VBD_MASK) | UC8151D_CDI_VBD_FLOATING;
+	if (border) {
+		/* Set VBD to LUTKW for border data */
+		cdi = (cdi & ~UC8151D_CDI_VBD_MASK) | UC8151D_CDI_VBD_LUTKW;
 	}
 
 	LOG_DBG("CDI: %#hhx", cdi);
@@ -773,10 +800,11 @@ static const struct uc81xx_quirks uc8151d_quirks = {
 
 	.auto_copy = false,    /* Manual copy required */
 	.pon_after_softstart = true,
+	.dtm_swap = false,
 
 	.set_cdi = uc8151d_set_cdi,
-	.set_tres = uc8151d_set_tres,
-	.set_ptl = uc8151d_set_ptl,
+	.set_tres = uc81xx_set_tres_h8v16,
+	.set_ptl = uc81xx_set_ptl_h8v16,
 };
 #endif
 
@@ -787,10 +815,11 @@ static const struct uc81xx_quirks uc8253_quirks = {
 
 	.auto_copy = false,
 	.pon_after_softstart = false,
+	.dtm_swap = true,
 
 	.set_cdi = uc8151d_set_cdi,
-	.set_tres = uc8151d_set_tres,
-	.set_ptl = uc8151d_set_ptl,
+	.set_tres = uc81xx_set_tres_h8v16,
+	.set_ptl = uc81xx_set_ptl_h8v16,
 };
 #endif
 
@@ -800,16 +829,22 @@ static int uc8179_set_cdi(const struct device *dev, bool border)
 	const struct uc81xx_config *config = dev->config;
 	const struct uc81xx_data *data = dev->data;
 	const struct uc81xx_profile *p = config->profiles[data->profile];
-	uint8_t cdi[UC8179_CDI_REG_LENGTH] = {
-		UC8179_CDI_BDV1 | UC8179_CDI_N2OCP | UC8179_CDI_DDX0,
-		p ? p->cdi : 0,
-	};
 
-	if (!p || !p->override_cdi) {
-		return 0;
+	uint8_t interval = UC8179_CDI_DEFAULT_INTERVAL;
+
+	if (p && p->override_cdi) {
+		interval = p->cdi & UC8179_CDI_CDI_MASK;
 	}
 
-	cdi[UC8179_CDI_BDZ_DDX_IDX] |= border ? 0 : UC8179_CDI_BDZ;
+	// Border uses LUTKW, force NEW->OLD auto-copy and NEW/OLD KW operation
+	uint8_t cdi[UC8179_CDI_REG_LENGTH] = {
+		UC8179_CDI_BDV1 | UC8179_CDI_N2OCP | UC8179_CDI_DDX0,
+		interval,
+	};
+
+	if (!border) {
+		cdi[UC8179_CDI_BDZ_DDX_IDX] |= UC8179_CDI_BDZ;
+	}
 
 	LOG_HEXDUMP_DBG(cdi, sizeof(cdi), "CDI");
 	return uc81xx_write_cmd(dev, UC81XX_CMD_CDI, cdi, sizeof(cdi));
@@ -821,6 +856,7 @@ static const struct uc81xx_quirks uc8179_quirks = {
 
 	.auto_copy = true,
 	.pon_after_softstart = false,
+	.dtm_swap = false,
 
 	.set_cdi = uc8179_set_cdi,
 	.set_tres = uc81xx_set_tres_16,
