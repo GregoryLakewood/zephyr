@@ -394,12 +394,6 @@ static int uc81xx_blanking_on(const struct device *dev)
 		if (uc81xx_set_profile(dev, UC81XX_PROFILE_FULL)) {
 			return -EIO;
 		}
-		const struct uc81xx_config *config = dev->config;
-		const int size = config->width * config->height
-			/ UC81XX_PIXELS_PER_BYTE;
-		if (uc81xx_write_cmd_pattern(dev, UC81XX_CMD_DTM1, 0xff, size)) {
-			return -EIO;
-		}
 	}
 
 	data->blanking_on = true;
@@ -481,18 +475,18 @@ static int uc81xx_write(const struct device *dev, const uint16_t x, const uint16
 		if (config->quirks->set_cdi(dev, true)) {
 			return -EIO;
 		}
+	}
 
-		if (!config->quirks->auto_copy) {
-			/* Some controllers don't copy the new data to the old
-			 * data buffer on refresh. Do that manually here if
-			 * needed.
-			 */
-			if (uc81xx_write_cmd(dev,
-					     data->phase == UC81XX_PHASE_NORMAL ? UC81XX_CMD_DTM1
-										: UC81XX_CMD_DTM2,
-					     (uint8_t *)buf, buf_len)) {
-				return -EIO;
-			}
+	if (!config->quirks->auto_copy) {
+		/* Some controllers don't copy the new data to the old
+			* data buffer on refresh. Do that manually here if
+			* needed.
+			*/
+		if (uc81xx_write_cmd(dev,
+							data->phase == UC81XX_PHASE_NORMAL ? UC81XX_CMD_DTM1
+									: UC81XX_CMD_DTM2,
+							(uint8_t *)buf, buf_len)) {
+			return -EIO;
 		}
 	}
 
@@ -511,15 +505,15 @@ static void uc81xx_get_capabilities(const struct device *dev,
 	memset(caps, 0, sizeof(struct display_capabilities));
 	caps->x_resolution = config->width;
 	caps->y_resolution = config->height;
-	caps->supported_pixel_formats = PIXEL_FORMAT_MONO10;
-	caps->current_pixel_format = PIXEL_FORMAT_MONO10;
+	caps->supported_pixel_formats = PIXEL_FORMAT_MONO01;
+	caps->current_pixel_format = PIXEL_FORMAT_MONO01;
 	caps->screen_info = SCREEN_INFO_MONO_MSB_FIRST | SCREEN_INFO_EPD;
 }
 
 static int uc81xx_set_pixel_format(const struct device *dev,
 				   const enum display_pixel_format pf)
 {
-	if (pf == PIXEL_FORMAT_MONO10) {
+	if (pf == PIXEL_FORMAT_MONO01) {
 		return 0;
 	}
 
