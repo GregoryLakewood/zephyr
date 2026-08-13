@@ -665,7 +665,7 @@ static inline int uc81xx_set_ptl_16(const struct device *dev, uint16_t x, uint16
 }
 #endif
 
-#if DT_HAS_COMPAT_STATUS_OKAY(ultrachip_uc8175) || DT_HAS_COMPAT_STATUS_OKAY(ultrachip_uc8176)
+#if DT_HAS_COMPAT_STATUS_OKAY(ultrachip_uc8176)
 static int uc8176_set_cdi(const struct device *dev, bool border)
 {
 	const struct uc81xx_config *config = dev->config;
@@ -692,6 +692,32 @@ static int uc8176_set_cdi(const struct device *dev, bool border)
 #endif
 
 #if DT_HAS_COMPAT_STATUS_OKAY(ultrachip_uc8175)
+static int uc8175_set_cdi(const struct device *dev, bool border)
+{
+	const struct uc81xx_config *config = dev->config;
+	const struct uc81xx_data *data = dev->data;
+	const struct uc81xx_profile *p = config->profiles[data->profile];
+
+	uint8_t interval = UC8175_CDI_DEFAULT_INTERVAL;
+
+	if (p && p->override_cdi) {
+		interval = p->cdi & UC8175_CDI_CDI_MASK;
+	}
+
+	// Border uses LUTW
+	uint8_t cdi = UC8176_CDI_VBD1 | UC8176_CDI_DDX0 | interval;
+
+	if (!border) {
+		/* Floating border */
+		cdi &= GENMASK(5,0);
+	}
+
+	LOG_DBG("CDI: %#hhx", cdi);
+	return uc81xx_write_cmd_uint8(dev, UC81XX_CMD_CDI, cdi);
+}
+#endif
+
+#if DT_HAS_COMPAT_STATUS_OKAY(ultrachip_uc8175)
 static const struct uc81xx_quirks uc8175_quirks = {
 	.max_width = 80,
 	.max_height = 160,
@@ -700,7 +726,7 @@ static const struct uc81xx_quirks uc8175_quirks = {
 	.pon_after_softstart = false,
 	.dtm_swap = false,
 
-	.set_cdi = uc8176_set_cdi,
+	.set_cdi = uc8175_set_cdi,
 	.set_tres = uc81xx_set_tres_8,
 	.set_ptl = uc81xx_set_ptl_8,
 };
